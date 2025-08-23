@@ -18,7 +18,7 @@ class CharacterChatBot():
 
     def __init__(self,
                  model_path,
-                 data_path="/content/data/naruto.csv",
+                 data_path="/content/data/BB_data.csv",
                  huggingface_token = None
                  ):
         
