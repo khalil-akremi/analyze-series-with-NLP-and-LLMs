@@ -4,6 +4,8 @@ from character_network import named_entity_recognizer, CharacterNetworkGenerator
 import os
 import pandas as pd
 from dotenv import load_dotenv
+from text_classifier import company_Classifier
+from character_chatbot import CharacterChatBot
 
 load_dotenv()
 
@@ -49,6 +51,26 @@ def get_character_network(subtitles_path, ner_path):
 
     return html
 
+
+def classify_text(text_classifcation_model,text_classifcation_data_path,text_to_classify):
+    company_classifier = company_Classifier(model_path = text_classifcation_model,
+                                       data_path = text_classifcation_data_path,
+                                       huggingface_token = os.getenv('huggingface_token'))
+    
+    output = company_classifier.classify(text_to_classify)
+
+    output = output[0]
+    
+    return output
+def chat_with_character_chatbot(message, history):
+    character_chatbot = CharacterChatBot("AbdullahTarek/Naruto_Llama-3-8B",
+                                         huggingface_token = os.getenv('huggingface_token')
+                                         )
+
+    output = character_chatbot.chat(message, history)
+    output = output['content'].strip()
+    return output
+
 # ---------------------------
 # GRADIO APP
 # ---------------------------
@@ -92,7 +114,24 @@ def main():
                             inputs=[subtitles_path_network, ner_path],
                             outputs=[network_html]
                         )
-
+        # Text Classification with LLMs
+        with gr.Row():
+            with gr.Column():
+                gr.HTML("<h1>Text Classification with LLMs</h1>")
+                with gr.Row():
+                    with gr.Column():
+                        text_classification_output = gr.Textbox(label="Text Classification Output")
+                    with gr.Column():
+                        text_classifcation_model = gr.Textbox(label='Model Path')
+                        text_classifcation_data_path = gr.Textbox(label='Data Path')
+                        text_to_classify = gr.Textbox(label='Text input')
+                        classify_text_button = gr.Button("Clasify Text")
+                        classify_text_button.click(classify_text, inputs=[text_classifcation_model,text_classifcation_data_path,text_to_classify], outputs=[text_classification_output])
+        # Character Chatbot Section
+        with gr.Row():
+            with gr.Column():
+                gr.HTML("<h1>Character Chatbot</h1>")
+                gr.ChatInterface(chat_with_character_chatbot)
         # Launch the app
         iface.launch(share=True)
 
