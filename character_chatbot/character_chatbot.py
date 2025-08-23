@@ -10,6 +10,7 @@ from transformers import (
     BitsAndBytesConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
+    pipeline,
 )
 from peft import LoraConfig, PeftModel
 from trl import SFTConfig, SFTTrainer
@@ -17,26 +18,21 @@ from trl import SFTConfig, SFTTrainer
 
 class CharacterChatBot:
     """
-    CharacterChatBot with:
-      - Correct TRL SFTTrainer API (uses formatting_func, not tokenizer/max_seq_length)
-      - Correct LoRA task_type (CAUSAL_LM)
-      - Stable chat() using chat templates (Llama-3 style) + text-generation pipeline
-      - Robust model loading for PEFT adapters stored on the Hub
+    CharacterChatBot for Walter White using:
+    - TRL 0.22.0.dev0 SFTTrainer API
+    - LoRA on Llama-3-8B
+    - Hugging Face pipeline for inference
     """
 
-    def __init__(
-        self,
-        model_path: str,
-        data_path: str = "/content/data/BB_data.csv",
-        huggingface_token: str | None = None,
-    ) -> None:
+    def __init__(self, model_path: str, data_path: str = "/content/data/BB_data.csv",
+                 huggingface_token: str | None = None):
         self.model_path = model_path
         self.data_path = data_path
         self.huggingface_token = huggingface_token
         self.base_model_path = "meta-llama/Meta-Llama-3-8B-Instruct"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        if self.huggingface_token is not None:
+        if self.huggingface_token:
             huggingface_hub.login(self.huggingface_token)
 
         if huggingface_hub.repo_exists(self.model_path):
@@ -48,51 +44,30 @@ class CharacterChatBot:
             self.pipeline = self.load_model(self.model_path)
 
     # ---------------------------
-    # Inference (chat)
+    # Chat interface
     # ---------------------------
     def chat(self, message: str, history: list[list[str]]):
-        """Chat with the character using a chat template."""
         tokenizer = self.pipeline.tokenizer
-
-        # Build messages with system prompt and history
-        messages = []
-        messages.append({
-            "role": "system",
-            "content": (
-                "You are Walter White from the TV series 'Breaking Bad'. "
-                "Your responses should reflect his personality and speech patterns.\n"
-            ),
-        })
+        messages = [{"role": "system",
+                     "content": "You are Walter White from Breaking Bad. Respond in character.\n"}]
         for user_msg, assistant_msg in history:
             messages.append({"role": "user", "content": user_msg})
             messages.append({"role": "assistant", "content": assistant_msg})
         messages.append({"role": "user", "content": message})
 
-        # Convert messages to a single prompt using the chat template
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
         terminators = [
             tokenizer.eos_token_id,
             tokenizer.convert_tokens_to_ids("<|eot_id|>"),
         ]
 
-        outputs = self.pipeline(
-            prompt,
-            max_new_tokens=256,
-            eos_token_id=terminators,
-            do_sample=True,
-            temperature=0.6,
-            top_p=0.9,
-            return_full_text=False,
-        )
+        outputs = self.pipeline(prompt, max_new_tokens=256, eos_token_id=terminators,
+                                do_sample=True, temperature=0.6, top_p=0.9, return_full_text=False)
         return outputs[0]["generated_text"].strip()
 
     # ---------------------------
-    # Load model + optional PEFT adapter
+    # Load model + adapter
     # ---------------------------
     def load_model(self, model_or_adapter_repo: str):
         bnb_config = BitsAndBytesConfig(
@@ -101,9 +76,8 @@ class CharacterChatBot:
             bnb_4bit_compute_dtype=torch.float16,
         )
 
-        # Load base model + tokenizer
-        base_tokenizer = AutoTokenizer.from_pretrained(self.base_model_path)
-        base_model = AutoModelForCausalLM.from_pretrained(
+        tokenizer = AutoTokenizer.from_pretrained(self.base_model_path)
+        model = AutoModelForCausalLM.from_pretrained(
             self.base_model_path,
             quantization_config=bnb_config,
             torch_dtype=torch.float16,
@@ -111,61 +85,44 @@ class CharacterChatBot:
             trust_remote_code=True,
         )
 
-        # Load adapter if different
         if model_or_adapter_repo != self.base_model_path:
             try:
-                base_model = PeftModel.from_pretrained(base_model, model_or_adapter_repo)
+                model = PeftModel.from_pretrained(model, model_or_adapter_repo)
             except Exception:
-                base_model = AutoModelForCausalLM.from_pretrained(
+                model = AutoModelForCausalLM.from_pretrained(
                     model_or_adapter_repo,
                     quantization_config=bnb_config,
                     torch_dtype=torch.float16,
                     device_map="auto",
                     trust_remote_code=True,
                 )
-                base_tokenizer = AutoTokenizer.from_pretrained(model_or_adapter_repo)
+                tokenizer = AutoTokenizer.from_pretrained(model_or_adapter_repo)
 
-        text_gen = transformers.pipeline(
-            task="text-generation",
-            model=base_model,
-            tokenizer=base_tokenizer,
-            model_kwargs={"torch_dtype": torch.float16},
-        )
-        return text_gen
+        return pipeline("text-generation", model=model, tokenizer=tokenizer, model_kwargs={"torch_dtype": torch.float16})
 
     # ---------------------------
-    # Training
+    # Training function
     # ---------------------------
-    def train(
-        self,
-        base_model_name_or_path: str,
-        dataset: Dataset,
-        output_dir: str = "./results",
-        per_device_train_batch_size: int = 1,
-        gradient_accumulation_steps: int = 1,
-        optim: str = "paged_adamw_32bit",
-        save_steps: int = 200,
-        logging_steps: int = 10,
-        learning_rate: float = 2e-4,
-        max_grad_norm: float = 0.3,
-        max_steps: int = 300,
-        warmup_ratio: float = 0.3,
-        lr_scheduler_type: str = "constant",
-    ) -> None:
+    def train(self, base_model_name_or_path: str, dataset: Dataset, output_dir: str = "./results",
+              per_device_train_batch_size: int = 1, gradient_accumulation_steps: int = 1,
+              optim: str = "paged_adamw_32bit", save_steps: int = 200, logging_steps: int = 10,
+              learning_rate: float = 2e-4, max_grad_norm: float = 0.3, max_steps: int = 300,
+              warmup_ratio: float = 0.3, lr_scheduler_type: str = "constant"):
+
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.float16,
         )
 
-        base_model = AutoModelForCausalLM.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             base_model_name_or_path,
             quantization_config=bnb_config,
             trust_remote_code=True,
             device_map="auto",
             torch_dtype=torch.float16,
         )
-        base_model.config.use_cache = False
+        model.config.use_cache = False
 
         tokenizer = AutoTokenizer.from_pretrained(base_model_name_or_path)
         tokenizer.pad_token = tokenizer.eos_token
@@ -178,7 +135,7 @@ class CharacterChatBot:
             task_type="CAUSAL_LM",
         )
 
-        training_arguments = SFTConfig(
+        training_args = SFTConfig(
             output_dir=output_dir,
             per_device_train_batch_size=per_device_train_batch_size,
             gradient_accumulation_steps=gradient_accumulation_steps,
@@ -195,29 +152,25 @@ class CharacterChatBot:
             report_to="none",
         )
 
-        # Formatting function replaces tokenizer/max_seq_length
-        def formatting_prompts(examples):
-            return examples["prompt"]
+        # Formatting function for new TRL API
+        def formatting_func(examples):
+            return [{"prompt": p, "completion": c} for p, c in zip(examples["prompt"], examples["completion"])]
 
         trainer = SFTTrainer(
-            model=base_model,
+            model=model,
             train_dataset=dataset,
             peft_config=peft_config,
-            args=training_arguments,
-            formatting_func=formatting_prompts,
+            args=training_args,
+            formatting_func=formatting_func,
         )
 
         trainer.train()
 
-        # Save adapter locally
         adapter_dir = "final_ckpt"
         trainer.model.save_pretrained(adapter_dir)
         tokenizer.save_pretrained(adapter_dir)
 
-        del trainer
-        gc.collect()
-
-        # Reload base + attach adapter for pushing to Hub
+        # Reload clean base and push adapter
         base_model_push = AutoModelForCausalLM.from_pretrained(
             base_model_name_or_path,
             quantization_config=bnb_config,
@@ -226,36 +179,33 @@ class CharacterChatBot:
             torch_dtype=torch.float16,
         )
         peft_model = PeftModel.from_pretrained(base_model_push, adapter_dir)
-
         peft_model.push_to_hub(self.model_path)
         tokenizer.push_to_hub(self.model_path)
 
-        del peft_model, base_model_push, base_model
+        del trainer, model, base_model_push, peft_model
         gc.collect()
 
     # ---------------------------
-    # Load dataset and build prompts
+    # Data loading
     # ---------------------------
     def load_data(self) -> Dataset:
-        df = pd.read_csv(self.data_path)
-        df = df.dropna()
+        df = pd.read_csv(self.data_path).dropna()
         df["text"] = df["text"].astype(str)
         df["number_of_words"] = df["text"].str.strip().str.split().apply(lambda x: len(x) if isinstance(x, list) else 0)
-        df["walter_response_flag"] = 0
-        df.loc[(df["actor"] == "Walter") & (df["number_of_words"] > 5), "walter_response_flag"] = 1
+        df["walter_response_flag"] = ((df["actor"] == "Walter") & (df["number_of_words"] > 5)).astype(int)
 
         idxs = df.index[df["walter_response_flag"] == 1].tolist()
-        system_prompt = (
-            "You are Walter White from the TV series 'Breaking Bad'. "
-            "Your responses should reflect his personality and speech patterns.\n"
-        )
+        system_prompt = "You are Walter White from Breaking Bad. Respond in his style.\n"
 
-        prompts: list[str] = []
+        prompts, completions = [], []
         for i in idxs:
             user_line = str(df.iloc[i - 1]["text"]).strip() if i - 1 in df.index else ""
             walter_line = str(df.iloc[i]["text"]).strip()
-            prompt = f"<|system|>\n{system_prompt}\n<|user|>\n{user_line}\n<|assistant|>\n{walter_line}"
-            prompts.append(prompt)
+            prompt_text = f"<|system|>\n{system_prompt}\n<|user|>\n{user_line}\n<|assistant|>\n"
+            prompts.append(prompt_text)
+            completions.append(walter_line)
 
-        return Dataset.from_pandas(pd.DataFrame({"prompt": prompts}))
+        dataset = Dataset.from_pandas(pd.DataFrame({"prompt": prompts, "completion": completions}))
+        return dataset
+
 
