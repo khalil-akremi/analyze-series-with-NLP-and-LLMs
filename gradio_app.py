@@ -53,7 +53,7 @@ def get_character_network(subtitles_path, ner_path):
 
 
 def chat_with_character_chatbot(message, history):
-    character_chatbot = CharacterChatBot("AbdullahTarek/Naruto_Llama-3-8B",
+    character_chatbot = CharacterChatBot("khalil_akremi/breaking_bad_Llama-3-8B",
                                          huggingface_token = os.getenv('huggingface_token')
                                          )
 
