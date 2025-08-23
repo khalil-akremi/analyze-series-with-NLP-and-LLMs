@@ -161,7 +161,7 @@ class CharacterChatBot:
             train_dataset=dataset,
             peft_config=peft_config,
             args=training_args,
-            formatting_func=formatting_func,
+            
         )
 
         trainer.train()
