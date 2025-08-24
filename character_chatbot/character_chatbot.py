@@ -123,13 +123,23 @@ class CharacterChatBot:
     def load_model(self, model_or_adapter_repo: str):
         self._clear_memory()
         
-        # More aggressive quantization for Colab
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,  # Additional memory savings
-        )
+        # Check if CUDA is available
+        if not torch.cuda.is_available():
+            print("WARNING: CUDA not available! Falling back to CPU (very slow for large models)")
+            if "Llama" in self.base_model_path:
+                raise RuntimeError(
+                    "Llama-3-8B requires GPU. Please enable GPU runtime in Colab or use a smaller model."
+                )
+        
+        # More aggressive quantization for Colab (only if CUDA available)
+        bnb_config = None
+        if torch.cuda.is_available():
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,  # Additional memory savings
+            )
 
         # Handle different model architectures
         if "DialoGPT" in self.base_model_path:
@@ -137,22 +147,30 @@ class CharacterChatBot:
             tokenizer = AutoTokenizer.from_pretrained(self.base_model_path, use_fast=True)
             model = AutoModelForCausalLM.from_pretrained(
                 self.base_model_path,
-                torch_dtype=torch.float16,
-                device_map="auto",
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto" if torch.cuda.is_available() else None,
                 trust_remote_code=True,
                 low_cpu_mem_usage=True,
             )
         else:
             tokenizer = AutoTokenizer.from_pretrained(self.base_model_path, use_fast=True)
             # Load with more memory-efficient settings
+            model_kwargs = {
+                "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32,
+                "trust_remote_code": True,
+                "low_cpu_mem_usage": True,
+            }
+            
+            if torch.cuda.is_available():
+                model_kwargs.update({
+                    "quantization_config": bnb_config,
+                    "device_map": "auto",
+                    "max_memory": {0: "10GB"},  # Limit GPU memory usage
+                })
+            
             model = AutoModelForCausalLM.from_pretrained(
                 self.base_model_path,
-                quantization_config=bnb_config,
-                torch_dtype=torch.float16,
-                device_map="auto",
-                trust_remote_code=True,
-                low_cpu_mem_usage=True,
-                max_memory={0: "10GB"},  # Limit GPU memory usage
+                **model_kwargs
             )
 
         if tokenizer.pad_token is None:
