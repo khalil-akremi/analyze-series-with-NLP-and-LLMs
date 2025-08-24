@@ -5,7 +5,6 @@ import torch
 import huggingface_hub
 from datasets import Dataset
 
-import transformers
 from transformers import (
     BitsAndBytesConfig,
     AutoModelForCausalLM,
@@ -35,6 +34,7 @@ class CharacterChatBot:
         if self.huggingface_token:
             huggingface_hub.login(self.huggingface_token)
 
+        # If an adapter/model with this repo id already exists, load it; else train and push
         if huggingface_hub.repo_exists(self.model_path):
             self.pipeline = self.load_model(self.model_path)
         else:
@@ -62,8 +62,15 @@ class CharacterChatBot:
             tokenizer.convert_tokens_to_ids("<|eot_id|>"),
         ]
 
-        outputs = self.pipeline(prompt, max_new_tokens=256, eos_token_id=terminators,
-                                do_sample=True, temperature=0.6, top_p=0.9, return_full_text=False)
+        outputs = self.pipeline(
+            prompt,
+            max_new_tokens=256,
+            eos_token_id=terminators,
+            do_sample=True,
+            temperature=0.6,
+            top_p=0.9,
+            return_full_text=False
+        )
         return outputs[0]["generated_text"].strip()
 
     # ---------------------------
@@ -76,7 +83,11 @@ class CharacterChatBot:
             bnb_4bit_compute_dtype=torch.float16,
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(self.base_model_path)
+        tokenizer = AutoTokenizer.from_pretrained(self.base_model_path, use_fast=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        # Try to load the base model first (QLoRA quantized)
         model = AutoModelForCausalLM.from_pretrained(
             self.base_model_path,
             quantization_config=bnb_config,
@@ -85,10 +96,12 @@ class CharacterChatBot:
             trust_remote_code=True,
         )
 
+        # If a LoRA adapter repo is provided (and not just the base), load it on top
         if model_or_adapter_repo != self.base_model_path:
             try:
                 model = PeftModel.from_pretrained(model, model_or_adapter_repo)
             except Exception:
+                # If they pushed a full merged model instead of an adapter, fall back to loading it directly
                 model = AutoModelForCausalLM.from_pretrained(
                     model_or_adapter_repo,
                     quantization_config=bnb_config,
@@ -96,19 +109,36 @@ class CharacterChatBot:
                     device_map="auto",
                     trust_remote_code=True,
                 )
-                tokenizer = AutoTokenizer.from_pretrained(model_or_adapter_repo)
+                tokenizer = AutoTokenizer.from_pretrained(model_or_adapter_repo, use_fast=True)
+                if tokenizer.pad_token is None:
+                    tokenizer.pad_token = tokenizer.eos_token
 
-        return pipeline("text-generation", model=model, tokenizer=tokenizer, model_kwargs={"torch_dtype": torch.float16})
+        return pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            model_kwargs={"torch_dtype": torch.float16}
+        )
 
     # ---------------------------
     # Training function
     # ---------------------------
-    def train(self, base_model_name_or_path: str, dataset: Dataset, output_dir: str = "./results",
-              per_device_train_batch_size: int = 1, gradient_accumulation_steps: int = 1,
-              optim: str = "paged_adamw_32bit", save_steps: int = 200, logging_steps: int = 10,
-              learning_rate: float = 2e-4, max_grad_norm: float = 0.3, max_steps: int = 300,
-              warmup_ratio: float = 0.3, lr_scheduler_type: str = "constant"):
-
+    def train(
+        self,
+        base_model_name_or_path: str,
+        dataset: Dataset,
+        output_dir: str = "./results",
+        per_device_train_batch_size: int = 1,
+        gradient_accumulation_steps: int = 1,
+        optim: str = "paged_adamw_32bit",
+        save_steps: int = 200,
+        logging_steps: int = 10,
+        learning_rate: float = 2e-4,
+        max_grad_norm: float = 0.3,
+        max_steps: int = 300,
+        warmup_ratio: float = 0.3,
+        lr_scheduler_type: str = "constant",
+    ):
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -122,10 +152,12 @@ class CharacterChatBot:
             device_map="auto",
             torch_dtype=torch.float16,
         )
+        # Needed for gradient checkpointing + QLoRA training
         model.config.use_cache = False
 
-        tokenizer = AutoTokenizer.from_pretrained(base_model_name_or_path)
-        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer = AutoTokenizer.from_pretrained(base_model_name_or_path, use_fast=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
         peft_config = LoraConfig(
             lora_alpha=16,
@@ -143,25 +175,34 @@ class CharacterChatBot:
             save_steps=save_steps,
             logging_steps=logging_steps,
             learning_rate=learning_rate,
-            fp16=True,
+            fp16=True,  # keep fp16 in 4-bit training
             max_grad_norm=max_grad_norm,
             max_steps=max_steps,
             warmup_ratio=warmup_ratio,
             group_by_length=True,
             lr_scheduler_type=lr_scheduler_type,
             report_to="none",
+            gradient_checkpointing=True,  # reduces memory usage
+            packing=False,                # safer with chat-style samples
         )
 
-        # Formatting function for new TRL API
+        # TRL 0.22 needs either dataset_text_field="text" OR a formatting_func.
+        # We provide a formatting_func that merges prompt + completion.
         def formatting_func(examples):
-            return [{"prompt": p, "completion": c} for p, c in zip(examples["prompt"], examples["completion"])]
+            texts = []
+            for p, c in zip(examples["prompt"], examples["completion"]):
+                # Keep the exact structure you trained for:
+                # prompt already ends with <|assistant|>\n so just append completion
+                texts.append(f"{p}{c}")
+            return texts
 
         trainer = SFTTrainer(
             model=model,
+            args=training_args,
+            tokenizer=tokenizer,
             train_dataset=dataset,
             peft_config=peft_config,
-            args=training_args,
-            
+            formatting_func=formatting_func,  # <-- key for new TRL API
         )
 
         trainer.train()
@@ -170,7 +211,7 @@ class CharacterChatBot:
         trainer.model.save_pretrained(adapter_dir)
         tokenizer.save_pretrained(adapter_dir)
 
-        # Reload clean base and push adapter
+        # Reload clean base and push adapter so the hub repo is a LoRA adapter
         base_model_push = AutoModelForCausalLM.from_pretrained(
             base_model_name_or_path,
             quantization_config=bnb_config,
