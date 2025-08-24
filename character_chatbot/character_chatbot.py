@@ -187,21 +187,23 @@ class CharacterChatBot:
             completion_only_loss=False,  # CRITICAL: Disable to use formatting_func
         )
 
-        # TRL 0.22 API - tokenizer is passed via the training_args, not directly
-        def formatting_func(examples):
-            texts = []
+        # OPTION 1: Pre-format the dataset instead of using formatting_func
+        def format_dataset(examples):
+            formatted_texts = []
             for p, c in zip(examples["prompt"], examples["completion"]):
-                texts.append(f"{p}{c}")
-            return texts
+                formatted_texts.append(f"{p}{c}")
+            return {"text": formatted_texts}
 
-        # FIXED: Remove tokenizer from SFTTrainer initialization
+        # Apply formatting to dataset before passing to trainer
+        formatted_dataset = dataset.map(format_dataset, batched=True, remove_columns=dataset.column_names)
+
+        # FIXED: Remove tokenizer and formatting_func from SFTTrainer initialization
         trainer = SFTTrainer(
             model=model,
             args=training_args,
-            train_dataset=dataset,
+            train_dataset=formatted_dataset,
             peft_config=peft_config,
-            formatting_func=formatting_func,
-            # tokenizer parameter removed - it's now handled internally
+            # No formatting_func needed - dataset is pre-formatted
         )
 
         # Set tokenizer manually after initialization (if needed)
