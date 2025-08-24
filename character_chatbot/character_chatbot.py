@@ -184,6 +184,7 @@ class CharacterChatBot:
             report_to="none",
             gradient_checkpointing=True,
             packing=False,
+            completion_only_loss=False,  # CRITICAL: Disable to use formatting_func
         )
 
         # TRL 0.22 API - tokenizer is passed via the training_args, not directly
