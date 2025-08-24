@@ -215,6 +215,11 @@ class CharacterChatBot:
         trainer.model.save_pretrained(adapter_dir)
         tokenizer.save_pretrained(adapter_dir)
 
+        # CRITICAL: Clear GPU memory before loading models for pushing
+        del trainer, model
+        gc.collect()
+        torch.cuda.empty_cache()
+
         # Reload clean base and push adapter so the hub repo is a LoRA adapter
         base_model_push = AutoModelForCausalLM.from_pretrained(
             base_model_name_or_path,
@@ -227,8 +232,9 @@ class CharacterChatBot:
         peft_model.push_to_hub(self.model_path)
         tokenizer.push_to_hub(self.model_path)
 
-        del trainer, model, base_model_push, peft_model
+        del base_model_push, peft_model
         gc.collect()
+        torch.cuda.empty_cache()
 
     # ---------------------------
     # Data loading
