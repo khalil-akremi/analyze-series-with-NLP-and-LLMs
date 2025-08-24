@@ -175,35 +175,36 @@ class CharacterChatBot:
             save_steps=save_steps,
             logging_steps=logging_steps,
             learning_rate=learning_rate,
-            fp16=True,  # keep fp16 in 4-bit training
+            fp16=True,
             max_grad_norm=max_grad_norm,
             max_steps=max_steps,
             warmup_ratio=warmup_ratio,
             group_by_length=True,
             lr_scheduler_type=lr_scheduler_type,
             report_to="none",
-            gradient_checkpointing=True,  # reduces memory usage
-            packing=False,                # safer with chat-style samples
+            gradient_checkpointing=True,
+            packing=False,
         )
 
-        # TRL 0.22 needs either dataset_text_field="text" OR a formatting_func.
-        # We provide a formatting_func that merges prompt + completion.
+        # TRL 0.22 API - tokenizer is passed via the training_args, not directly
         def formatting_func(examples):
             texts = []
             for p, c in zip(examples["prompt"], examples["completion"]):
-                # Keep the exact structure you trained for:
-                # prompt already ends with <|assistant|>\n so just append completion
                 texts.append(f"{p}{c}")
             return texts
 
+        # FIXED: Remove tokenizer from SFTTrainer initialization
         trainer = SFTTrainer(
             model=model,
             args=training_args,
-            tokenizer=tokenizer,
             train_dataset=dataset,
             peft_config=peft_config,
-            formatting_func=formatting_func,  # <-- key for new TRL API
+            formatting_func=formatting_func,
+            # tokenizer parameter removed - it's now handled internally
         )
+
+        # Set tokenizer manually after initialization (if needed)
+        trainer.tokenizer = tokenizer
 
         trainer.train()
 
